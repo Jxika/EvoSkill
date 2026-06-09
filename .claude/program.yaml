@@ -46,3 +46,4 @@ metadata:
   provider_id: anthropic
   model_id: deepseek-v4-flash
   cwd: D:\github\EvoSkill
+  score: 0.0
