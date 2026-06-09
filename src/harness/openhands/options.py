@@ -12,7 +12,9 @@ from .workspace import prepare_data_dir_mounts, serialize_data_dir_mounts
 
 DEFAULT_OPENHANDS_MODEL = DEFAULT_ANTHROPIC_MODEL
 
-
+'''
+解析模型字符串
+'''
 def split_openhands_model(model: str | None) -> tuple[str, str]:
     """Parse 'provider/model' string into (provider_id, model_id)."""
     full = normalize_harness_model("openhands", model)
@@ -20,21 +22,19 @@ def split_openhands_model(model: str | None) -> tuple[str, str]:
         return full.split("/", 1)
     return "anthropic", full
 
-
-def build_openhands_options(
-    *,
-    system: str,
-    schema: dict[str, Any],
-    tools: Iterable[str],
-    project_root: str | Path | None = None,
-    model: str | None = None,
-    data_dirs: Iterable[str] | None = None,
-) -> dict[str, Any]:
+'''
+构建options字典
+'''
+def build_openhands_options(*,system: str,schema: dict[str, Any],tools: Iterable[str],project_root: str | Path | None = None,model: str | None = None,
+    data_dirs: Iterable[str] | None = None,) -> dict[str, Any]:
     """Build an options dict for the OpenHands SDK."""
+    #解析路径与模型
     root = resolve_project_root(project_root)
     provider_id, model_id = split_openhands_model(model)
     full_model = f"{provider_id}/{model_id}"
     source_add_dirs = resolve_data_dirs(root, data_dirs)
+
+    #数据目录挂载
     data_dir_mounts = prepare_data_dir_mounts(root, source_add_dirs)
     mounted_add_dirs = [mount.path for mount in data_dir_mounts]
 
@@ -49,7 +49,7 @@ def build_openhands_options(
         )
 
     return {
-        "sdk": "openhands",
+        "sdk": "openhands",  #openhands在沙箱/workspace里跑agent，项目外的data_dirs 不能直接读。
         "system": system_with_dirs,
         "format": {
             "type": "json_schema",

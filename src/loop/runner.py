@@ -231,8 +231,15 @@ class SelfImprovingLoop:
             self._delete_checkpoint()
         else:
             # Continue mode: keep feedback, find highest iteration number
+            # 历史轮次偏移
+            # 续跑时新分支不会叫 iter-skill-1，而是iter-skill-4（若已有1~3）
+            # 日志/UI 显示的是【全局第几轮】,不是【本次run的第几轮】
             self._iteration_offset = self._get_highest_iteration()
             # Try to load checkpoint for exact sampling state resume
+            '''
+               resume_iteration:checkpoint记录的【上次完整跑完的全局轮次】
+               用途:跳过已完成的轮次。
+            '''
             resume_iteration = self._load_checkpoint()
             if resume_iteration is not None:
                 _log("CONTINUE", f"Resuming from iteration {resume_iteration} with exact sampling state")

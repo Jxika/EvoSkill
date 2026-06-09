@@ -197,18 +197,10 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
     """Run the self-improvement loop."""
     from src.harness import Agent, set_sdk
     from src.agent_profiles.base_agent.base_agent import make_base_agent_options_from_task
-    from src.agent_profiles.prompt_generator.prompt_generator import (
-        make_prompt_generator_options,
-    )
-    from src.agent_profiles.prompt_proposer.prompt_proposer import (
-        make_prompt_proposer_options,
-    )
-    from src.agent_profiles.skill_generator.skill_generator import (
-        make_skill_generator_options,
-    )
-    from src.agent_profiles.skill_proposer.skill_proposer import (
-        make_skill_proposer_options,
-    )
+    from src.agent_profiles.prompt_generator.prompt_generator import ( make_prompt_generator_options )
+    from src.agent_profiles.prompt_proposer.prompt_proposer import ( make_prompt_proposer_options, )
+    from src.agent_profiles.skill_generator.skill_generator import (make_skill_generator_options,)
+    from src.agent_profiles.skill_proposer.skill_proposer import (make_skill_proposer_options,)
     from src.cli.config import load_config
     from src.cli.shared import load_and_split, make_scorer
     from src.loop import LoopAgents, LoopConfig, SelfImprovingLoop

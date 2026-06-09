@@ -25,13 +25,7 @@ BASE_AGENT_TOOLS = [
 PROMPT_FILE = Path(__file__).parent / "prompt.txt"
 
 
-def _build_base_agent_options(
-    prompt_text: str,
-    *,
-    model: str | None = None,
-    data_dirs: list[str] | None = None,
-    project_root: str | Path | None = None,
-) -> Any:
+def _build_base_agent_options(prompt_text: str,*,model: str | None = None,data_dirs: list[str] | None = None,project_root: str | Path | None = None,) -> Any:
     return build_options(
         system=prompt_text,
         schema=AgentResponse.model_json_schema(),
@@ -45,11 +39,7 @@ def _build_base_agent_options(
     )
 
 
-def get_base_agent_options(
-    model: str | None = None,
-    data_dirs: list[str] | None = None,
-    project_root: str | Path | None = None,
-) -> Any:
+def get_base_agent_options(model: str | None = None,data_dirs: list[str] | None = None,project_root: str | Path | None = None,) -> Any:
     """Factory that creates agent options with the current prompt.
 
     Reads prompt.txt from disk each time, allowing dynamic updates
@@ -61,12 +51,7 @@ def get_base_agent_options(
     )
 
 
-def make_base_agent_options_from_task(
-    task_description: str,
-    model: str | None = None,
-    data_dirs: list[str] | None = None,
-    project_root: str | Path | None = None,
-):
+def make_base_agent_options_from_task(task_description: str,model: str | None = None,data_dirs: list[str] | None = None,project_root: str | Path | None = None,):
     """Create a factory that uses task_description as the agent system prompt."""
     def factory() -> Any:
         return _build_base_agent_options(

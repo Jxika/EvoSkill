@@ -45,18 +45,10 @@ def resolve_data_dirs(
 # Router (SDK builders imported lazily inside the function to avoid cycles)
 # ---------------------------------------------------------------------------
 
-def build_options(
-    *,
-    system: str,
-    schema: dict[str, Any],
-    tools: Iterable[str],
-    project_root: str | Path | None = None,
-    model: str | None = None,
-    data_dirs: Iterable[str] | None = None,
+def build_options(*,system: str,schema: dict[str, Any],tools: Iterable[str],project_root: str | Path | None = None,
+    model: str | None = None,data_dirs: Iterable[str] | None = None,
     # Claude-specific extras — silently ignored on other harnesses
-    setting_sources: list[str] | None = None,
-    permission_mode: str | None = None,
-    max_buffer_size: int | None = None,
+    setting_sources: list[str] | None = None,permission_mode: str | None = None,max_buffer_size: int | None = None,
 ) -> Any:
     """Route to the correct builder for the active SDK.
 
