@@ -1,0 +1,48 @@
+name: base
+parent: null
+generation: 0
+system_prompt:
+  type: text
+  content: '"# Task
+
+    Answer the question directly, providing only the final solution.
+
+
+    ## Constraints
+
+    - Do not explain your reasoning
+
+    - Keep answers under 10 words"'
+allowed_tools:
+- read
+- write
+- bash
+- glob
+- grep
+- edit
+- webfetch
+- websearch
+- todowrite
+- skill
+output_format:
+  type: json_schema
+  schema:
+    properties:
+      final_answer:
+        title: Final Answer
+        type: string
+      reasoning:
+        title: Reasoning
+        type: string
+    required:
+    - final_answer
+    - reasoning
+    title: AgentResponse
+    type: object
+metadata:
+  created_at: '2026-06-09T13:11:05.702521'
+  sdk: opencode
+  mode: build
+  provider_id: anthropic
+  model_id: deepseek-v4-flash
+  cwd: D:\github\EvoSkill
