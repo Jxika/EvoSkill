@@ -3,6 +3,9 @@
 from importlib import import_module
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _COMMAND_SPECS = {
     "init": ("src.cli.commands.init", "init_cmd", "Initialize a new EvoSkill project in the current directory."),

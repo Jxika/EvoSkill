@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -99,12 +100,92 @@ def _kill_pid(pid: int) -> None:
 def _kill_all_opencode_servers() -> None:
     """Kill all opencode serve processes on this machine."""
     try:
-        subprocess.run(
-            ["pkill", "-f", "opencode serve"],
-            capture_output=True, timeout=5,
-        )
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "opencode.exe"],
+                capture_output=True,
+                timeout=5,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", "opencode serve"],
+                capture_output=True,
+                timeout=5,
+            )
     except Exception:
         pass
+
+
+def _opencode_executable_candidates() -> list[str]:
+    """Return candidate paths/names for the OpenCode CLI, in priority order."""
+    override = os.environ.get("OPENCODE_BIN", "").strip()
+    if override:
+        return [override]
+
+    candidates: list[str] = []
+    if os.name == "nt":
+        candidates.extend(["opencode.exe", "opencode.cmd", "opencode"])
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            npm_bin = Path(appdata) / "npm"
+            candidates.extend(
+                str(p)
+                for p in (
+                    npm_bin / "opencode.cmd",
+                    npm_bin / "opencode.exe",
+                    npm_bin / "opencode.ps1",
+                )
+            )
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(str(Path(local_app) / "Programs" / "opencode" / "opencode.exe"))
+
+        # Local npm install (e.g. npm install opencode-ai in project root)
+        for base in (Path.cwd(), *Path.cwd().parents):
+            node_modules = base / "node_modules"
+            for pattern in (
+                "opencode-windows-x64/bin/opencode.exe",
+                "opencode-ai/node_modules/opencode-windows-x64/bin/opencode.exe",
+                ".bin/opencode.cmd",
+            ):
+                candidates.append(str(node_modules / pattern))
+    else:
+        candidates.append("opencode")
+
+    return candidates
+
+
+def _resolve_opencode_executable() -> str:
+    """Locate the OpenCode CLI executable or raise a helpful error."""
+    for candidate in _opencode_executable_candidates():
+        path = Path(candidate)
+        if path.is_file():
+            return str(path.resolve())
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    raise FileNotFoundError(
+        "OpenCode CLI not found. Install it and ensure it is on PATH, for example:\n"
+        "  npm install -g opencode-ai\n"
+        "  scoop install opencode\n"
+        "Or set OPENCODE_BIN to the full path of opencode.exe / opencode.cmd."
+    )
+
+
+def _ensure_provider_api_key(provider_id: str | None) -> None:
+    """Fail fast when a configured provider has no API key in the environment."""
+    if not provider_id:
+        return
+    env_vars = _PROVIDER_ENV_KEYS.get(provider_id.strip().lower(), [])
+    if not env_vars:
+        return
+    if any(os.environ.get(name) for name in env_vars):
+        return
+    raise RuntimeError(
+        f"Missing API key for provider {provider_id!r}. "
+        f"Set one of: {', '.join(env_vars)} (e.g. in a .env file at the project root)."
+    )
 
 
 def shutdown_project_server(project_root: str | Path | None) -> None:
@@ -152,13 +233,21 @@ def _ensure_server(options: dict[str, Any]) -> str:
     env = dict(os.environ)
     apply_openrouter_env(options.get("provider_id"), env)
 
+    opencode_bin = _resolve_opencode_executable()
+    popen_kwargs: dict[str, Any] = {
+        "cwd": options.get("cwd"),
+        "env": env,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
     proc = subprocess.Popen(
-        ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
-        cwd=options.get("cwd"),
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        [opencode_bin, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
+        **popen_kwargs,
     )
 
     _SERVER_PORTS[key] = port
@@ -177,7 +266,9 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
     if not isinstance(options, dict):
         raise TypeError(f"OpenCode executor requires dict options, got {type(options)}")
 
-    ensure_openrouter_api_key(options.get("provider_id"))
+    provider_id = options.get("provider_id")
+    ensure_openrouter_api_key(provider_id)
+    _ensure_provider_api_key(provider_id)
     base_url = _ensure_server(options)
 
     async with httpx.AsyncClient(base_url=base_url, timeout=_TIMEOUT) as client:

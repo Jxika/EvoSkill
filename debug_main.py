@@ -1,10 +1,14 @@
-from src.cli.main import cli
-import os
+"""Local debugger entry — equivalent to ``evoskill run`` with optional flags."""
+
 from dotenv import load_dotenv
 
 load_dotenv()
-if __name__ == '__main__':
+
+from src.cli.main import cli
+
+if __name__ == "__main__":
     import sys
-    print(bool(os.environ.get("DEEPSEEK_API_KEY")))  
-    sys.argv = ['evoskill', 'run', '--continue']
+
+    # Fresh run (drop --continue once you want to resume an existing frontier):
+    sys.argv = ["evoskill", "run"]
     cli()
