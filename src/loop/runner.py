@@ -213,7 +213,10 @@ class SelfImprovingLoop:
         """Delete checkpoint file if it exists."""
         if self._checkpoint_path.exists():
             self._checkpoint_path.unlink()
-
+    
+    '''
+    run()是EvoSkill 的核心调度引擎：负责[基线->多轮抽样->错题进化->验证淘汰->早停->返回结果]整条闭环。
+    '''
     async def run(self) -> LoopResult:
         """Run the full self-improving loop.
 
@@ -266,7 +269,7 @@ class SelfImprovingLoop:
 
         for i in range(self.config.max_iterations):
             iteration_count = i + 1
-            actual_iteration = iteration_count + self._iteration_offset
+            actual_iteration = iteration_count + self._iteration_offset #全局轮次，用于iter-skill-N 命名
 
             # Skip already-completed iterations when resuming with checkpoint
             if resume_iteration is not None and actual_iteration <= resume_iteration:
@@ -274,7 +277,7 @@ class SelfImprovingLoop:
 
             # Select parent from frontier using configured strategy
             parent = self._select_parent(iteration_count)
-            self.manager.switch_to(parent)
+            self.manager.switch_to(parent) #会checkout对应分支，工作区里的.claude/skills/变成该版本的状态。
             self._iter_cost = 0.0  # Reset per-iteration cost
             _log(f"ITER {iteration_count}/{self.config.max_iterations}", f"Parent: {parent}")
             self._emit("iter_start", iteration=actual_iteration, total=self.config.max_iterations, parent=parent)
@@ -284,12 +287,14 @@ class SelfImprovingLoop:
 
             test_samples: list[tuple[str, str, str]] = []
             sampled_cats: list[str] = []
+            #按category轮转抽提（不是每轮全量训练集）
             for j in range(n_cats_this_iter):
                 cat_idx = (self._category_offset + j) % n_cats
                 cat = categories[cat_idx]
                 pool = self.train_pools[cat]
 
                 # Take min(samples_per_category, pool_size) to handle small categories
+                #目的：省钱，且从多类错题里找共性能力缺口，避免过拟合单题。
                 samples_to_take = min(self.config.samples_per_category, len(pool))
 
                 for _ in range(samples_to_take):
@@ -304,6 +309,7 @@ class SelfImprovingLoop:
             _log("", f"  Testing {len(test_samples)} samples from categories: {', '.join(sampled_cats)}...")
 
             # Run all samples concurrently
+            # 打分
             traces = await asyncio.gather(*[
                 self.agents.base.run(question) for question, _, _ in test_samples
             ])
@@ -323,6 +329,7 @@ class SelfImprovingLoop:
                 status = "[OK]" if avg_score >= 0.8 else "[FAIL]"
                 _log("", f"    {status} [{category}] {question[:40]}...")
                 self._emit("sample", question=question, category=category, score=avg_score, passed=avg_score >= 0.8)
+                #scorer打分 >= 0.8算对。错题收集（trace，模型答案，标准答案，category），trace给proposer分析。
                 if avg_score < 0.8:
                     failures.append((trace, agent_answer, answer, category))
 
@@ -340,33 +347,34 @@ class SelfImprovingLoop:
             )
 
             # Run proposer with all failures (use actual iteration number with offset)
+            # _mutate_with_fallback：trace太长时逐级截断，扔失败则只保留最短错题
             mutation_result = await self._mutate_with_fallback(parent, failures, actual_iteration)
 
             if mutation_result is None:
                 no_improvement_count += 1
             else:
+                #子代全量验证 + frontier淘汰
                 child_name, proposal, justification = mutation_result
 
                 # Evaluate child
                 _log("", f"  -> Evaluating {child_name}...")
+                # 子代在完整val集上重考(不是刚才那几道训练题)
                 child_score = await self._evaluate(self.val_data)  # accumulates to self._iter_cost
 
-                # Update frontier or discard
-                added = self.manager.update_frontier(
-                    child_name, child_score, max_size=self.config.frontier_size
-                )
-
+                # 分数够高->进frontier(最多保留frontier_size个)
+                added = self.manager.update_frontier(child_name, child_score, max_size=self.config.frontier_size)
+                #
                 if added:
                     _log("", f"  [OK] Added to frontier (score: {child_score:.4f})")
                     outcome = "improved" if child_score > parent_score else "kept"
                     no_improvement_count = 0
-                else:
+                else:  #分数不够就丢弃
                     _log("", f"  [SKIP] Discarded (score: {child_score:.4f})")
                     outcome = "discarded"
                     self.manager.discard(child_name)
                     no_improvement_count += 1
 
-                self._emit(
+                self._emit(  #通知LoopDisplay 更新终端UI
                     "eval_result",
                     child_name=child_name,
                     score=child_score,
@@ -377,8 +385,8 @@ class SelfImprovingLoop:
                 )
 
                 # Record feedback with outcome for future proposers to learn from
-                active_skills = self._get_active_skills()
-                append_feedback(
+                active_skills = self._get_active_skills() #扫.claude/skills/里现有技能
+                append_feedback(  #写入反馈历史，供后续轮次proposer参考。
                     self._feedback_path,
                     child_name,
                     proposal,
@@ -421,10 +429,11 @@ class SelfImprovingLoop:
             iterations_completed=iteration_count,
             total_cost_usd=self._total_cost,
         )
-
+    #建立并跑分[零进化起点]base，把它登记进frontier，作为后续所有变异的参照线。
+    #在run()里，只有“非continue续跑”或“continue但没有frontier”时才会调用它。
     async def _ensure_base_program(self) -> None:
         """Create and evaluate base program if it doesn't exist."""
-        if "base" not in self.manager.list_programs():
+        if "base" not in self.manager.list_programs(): #确保Git上有program/base分支
             current_options = self.agents.base._get_options()
             base_config = options_to_config(current_options, "base")
             self.manager.create_program("base", base_config)
@@ -457,7 +466,7 @@ class SelfImprovingLoop:
         """
         # Convert to (question, answer) format for evaluate_agent_parallel
         qa_data = [(q, a) for q, a, _ in data]
-        results = await evaluate_agent_parallel(
+        results = await evaluate_agent_parallel( #并发跑分
             self.agents.base, qa_data, max_concurrent=self.config.concurrency, cache=self.cache
         )
 
@@ -474,13 +483,25 @@ class SelfImprovingLoop:
             )
         return score / len(results)
 
-    async def _mutate(
-        self,
-        parent: str,
-        failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],
-        iteration: int,
-        truncation_level: int = 0,
-    ) -> tuple[str, str, str] | None:
+    '''
+    __mutate是EvoSkill 进化循环里的[根据错题生成子代程序]一步：把训练抽样里的失败轨迹交给proposer分析，再让generator真正改skill或prompt，
+    最后在Git上建子分支并 commit。
+    parent：当前frontier 选中的父程序名（base、iter-skill-2）
+    failures:错题列表，每项是（AgentTrace，模型答案，标准答案，category）
+    iteration：轮次编号（用于分支名 iter-skill-N、iter-prompt-N）
+    truncation_level: proposer 上下文截断级别（0 全量 -> 2 激进）
+    返回值：
+      . 成功：（child_name,proposed,justification）
+      . proposer解析失败：None（不建可用子代）
+    整体流程（两阶段 meta-agent）
+    1. 拼 proposer 查询（错题 trace+历史 feedback+现有skills）
+    2. 跑 proposer -> 得到 [改什么，为什么]
+    3. Git 从parent建 child 分支
+    4. 跑 generator-> 写 SKILL.md 或 prompt.txt
+    5. commit -> 返回子代信息
+    '''
+    async def _mutate(self,parent: str,failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],
+        iteration: int,truncation_level: int = 0,) -> tuple[str, str, str] | None:
         """Run proposer and generator to create a mutation based on multiple failures.
 
         Args:
@@ -493,12 +514,25 @@ class SelfImprovingLoop:
             Tuple of (child_name, proposal, justification) if created, None otherwise.
         """
         # Calculate actual iteration number (with offset for continue mode)
+        #全局轮次，用于iter-skill-N 命名
+        '''
+           而run()调用时传入的已是actual_iteration=iteration_count + self._iteration_offset
+           在continue模式下，这里可能对 offset 加两次，分支名会比预期偏大。fresh run（offset=0）不受影响。
+               若你续跑时看到 iter-skill-8 而预期是 4，值得核对这一点。
+        '''
         actual_iteration = iteration + self._iteration_offset
 
         # Run appropriate proposer based on evolution mode
         evolution_mode = self.config.evolution_mode
         _log("", f"  -> Running {evolution_mode.replace('_only', '')} proposer with {len(failures)} failures...")
         feedback_history = read_feedback_history(self._feedback_path)
+        '''
+        .按truncation_level 截断trace(head/tail)、feedback行数、最多几道错题
+        .列出.claude/skills/里所有技能，供proposer 参考。
+        .每道错题附上 trace.summarize()、模型答案、标准答案、category
+        .要求proposer找跨类别的共性缺口，而不是单题patch。
+    truncation_level由外层 _mutate_with_fallback 逐级递增。
+        '''
         proposer_query = build_proposer_query(failures, feedback_history, evolution_mode, truncation_level, self.task_constraints, project_root=self._project_root)
 
         if evolution_mode == "skill_only":
@@ -522,10 +556,16 @@ class SelfImprovingLoop:
             # Create child program branch
             child_name = f"iter-skill-{actual_iteration}"
             parent_config = self.manager.get_current()
+            #mutate 改config，建子分支，commit
             child_config = parent_config.mutate(child_name)
             self.manager.create_program(child_name, child_config, parent=parent)
 
             # Generate skill - use different query for edit vs create
+            '''
+              让generator读 .claude/skills/{target}/SKILL.md 并修改。
+              create：按proposer_trace 写新skill
+              通过对比skills_before/after 检测新创建的skill目录名。
+            '''
             if action_type == "edit" and target_skill:
                 _log("", f"  -> Editing existing skill: {target_skill}...")
                 skill_query = f"""EDIT existing skill: {target_skill}
@@ -602,7 +642,9 @@ and modify it to add these capabilities. Preserve all existing content that is s
 
         # Return mutation info (feedback will be written by caller with outcome)
         return (child_name, proposed, justification)
-
+    '''
+       容错包装
+    '''
     async def _mutate_with_fallback(
         self,
         parent: str,
@@ -640,10 +682,7 @@ and modify it to add these capabilities. Preserve all existing content that is s
         _log("", f"  [WARN] All proposer fallback attempts failed")
         return None
 
-    def _pick_shortest_failure(
-        self,
-        failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],
-    ) -> tuple[AgentTrace[AgentResponse], str, str, str]:
+    def _pick_shortest_failure(self,failures: list[tuple[AgentTrace[AgentResponse], str, str, str]],) -> tuple[AgentTrace[AgentResponse], str, str, str]:
         """Pick the failure with the shortest trace for fallback.
 
         Args:

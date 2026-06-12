@@ -27,14 +27,12 @@ class EvalResult(Generic[T]):
     ground_truth: str
     trace: AgentTrace[T] | None
 
-
-async def evaluate_agent_parallel(
-    agent: Agent[T],
-    items: list[tuple[str, str]],
-    max_concurrent: int = 2,
-    *,
-    cache: "RunCache | None" = None,
-) -> list[EvalResult[T]]:
+'''
+evaluate_agent_paralle 是 EvoSkill里批量、并发跑agent答案的函数；_ensure_base_program、子代_evaluate都通过
+它执行。cache是可选的RunCache，用来避免在相同题目+相同agent环境下重复调LLM。
+'''
+async def evaluate_agent_parallel(agent: Agent[T],items: list[tuple[str, str]],max_concurrent: int = 2,*,
+    cache: "RunCache | None" = None,) -> list[EvalResult[T]]:
     """
     Run agent on multiple questions in parallel.
 
@@ -47,7 +45,7 @@ async def evaluate_agent_parallel(
     Returns:
         List of EvalResult containing question, ground_truth, and trace
     """
-    semaphore = asyncio.Semaphore(max_concurrent)
+    semaphore = asyncio.Semaphore(max_concurrent) #最大并发数
 
     async def run_one(question: str, ground_truth: str) -> EvalResult[T]:
         async with semaphore:
@@ -58,7 +56,7 @@ async def evaluate_agent_parallel(
                     sdk = get_sdk()
                     model = _extract_model(agent._get_options())
                     if cache is not None:
-                        trace = cache.get(
+                        trace = cache.get(  #先查cache，再agent.run:命中就不花钱、不调模型。
                             question,
                             agent.response_model,
                             sdk=sdk,
@@ -81,5 +79,5 @@ async def evaluate_agent_parallel(
             return EvalResult(question=question, ground_truth=ground_truth, trace=trace)
 
     tasks = [run_one(q, gt) for q, gt in items]
-    results = await tqdm_asyncio.gather(*tasks, desc="Evaluating")
+    results = await tqdm_asyncio.gather(*tasks, desc="Evaluating") #并行跑，tqdm显示进度。
     return results

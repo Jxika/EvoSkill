@@ -45,7 +45,9 @@ _PROVIDER_ENV_KEYS = {
     "xai": ["XAI_API_KEY"],
 }
 
-
+"""
+OpenCode 不直接读.env,而是从自己的 auth store 读key。启动server后会：
+"""
 def _push_provider_auth(base_url: str) -> None:
     """Push all available API keys from env into the opencode server's auth store.
 
@@ -154,7 +156,14 @@ def _opencode_executable_candidates() -> list[str]:
 
     return candidates
 
-
+#第二部分:Server生命周期
+'''
+  1.OPENCODE_BIN 环境变量
+  2.PATH 上的 opencode.exe/opencode.cmd
+  3.%APPDATA%\npm\opencode.exe
+  4.项目node_modules里的本地安装
+找不到则抛出带安装提示的 FileNotFoundError(之前遇到的WinError2就是这里)。
+'''
 def _resolve_opencode_executable() -> str:
     """Locate the OpenCode CLI executable or raise a helpful error."""
     for candidate in _opencode_executable_candidates():
@@ -211,7 +220,7 @@ def _wait_for_port(port: int, timeout: float = 15) -> None:
         except OSError:
             time.sleep(0.5)
 
-
+# 核心启动逻辑
 def _ensure_server(options: dict[str, Any]) -> str:
     """Return ``http://127.0.0.1:<port>`` for a running opencode server.
 
@@ -226,7 +235,7 @@ def _ensure_server(options: dict[str, Any]) -> str:
             return f"http://127.0.0.1:{port}"
 
     # kill ALL opencode servers from previous runs
-    _kill_all_opencode_servers()
+    _kill_all_opencode_servers() # 清理所有旧server，避免端口冲突
     time.sleep(0.5)
 
     port = _find_free_port()
@@ -261,7 +270,7 @@ def _ensure_server(options: dict[str, Any]) -> str:
 
 
 # ── query execution ──────────────────────────────────────────────────
-
+# 发一轮对话
 async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
     if not isinstance(options, dict):
         raise TypeError(f"OpenCode executor requires dict options, got {type(options)}")
@@ -278,6 +287,7 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
         session_id = r.json()["id"]
 
         # 2. send message (nested model object — required by the server)
+        
         body: dict[str, Any] = {
             "parts": [{"type": "text", "text": query}],
             "model": {
@@ -285,6 +295,7 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
                 "modelID": options.get("model_id", "claude-sonnet-4-6"),
             },
         }
+        print( f"body: {body}")
         if options.get("system"):
             body["system"] = options["system"]
         if options.get("tools"):
@@ -293,7 +304,7 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
             body["mode"] = options["mode"]
         if options.get("format"):
             body["format"] = options["format"]
-
+        #当前的400错误发生在 POST .../message:raise_for_status()时OpenCode拒绝做个format结构。
         r = await client.post(f"/session/{session_id}/message", json=body)
         r.raise_for_status()
         chat_info = r.json()
@@ -307,12 +318,13 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
 
 
 # ── response parsing ─────────────────────────────────────────────────
+'''
+parse_response ---转成AgentTrace 字段
+1.找最后一条 assistant消息
+2.拼文本结果
 
-def parse_response(
-    messages: list[Any],
-    response_model: Type[BaseModel],
-    get_options: Callable[[], Any],
-) -> dict[str, Any]:
+'''
+def parse_response(messages: list[Any],response_model: Type[BaseModel],get_options: Callable[[], Any],) -> dict[str, Any]:
     payload = messages[0]
     all_msgs: list[dict] = payload.get("messages", [])
 

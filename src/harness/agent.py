@@ -39,7 +39,14 @@ OptionsProvider = Union[
     Callable[[], Union[ClaudeAgentOptionsType, dict[str, Any]]],
 ]
 
-
+'''
+AgentTrace是一次agent 运行的完整结果容器：把Claude/OpenCode/Goose等不同SDK的原始返回，统一成同一个Pydantic模型，供评估、进化循环、缓存复用。
+与Agent[T]的关系
+ Agent[T].run(query) -> AgentTrace[T]
+   > Agent: 执行（选SDK、重试、超时）
+   > AgentTrace:这一次运行的快照（元数据+结构化output+原始result）
+ 一对类型参数 T 把[跑的是哪种agent]和[output长什么样子]绑定在一起。
+'''
 class AgentTrace(BaseModel, Generic[T]):
     """Metadata and output from a single agent run.
 
@@ -55,32 +62,32 @@ class AgentTrace(BaseModel, Generic[T]):
     tools: list[str] = []
 
     # Metrics — cost and performance
-    duration_ms: int
+    duration_ms: int   #耗时，毫秒
     total_cost_usd: float
-    num_turns: int
-    usage: dict[str, Any]
-    result: str
-    is_error: bool
+    num_turns: int         #agent轮数
+    usage: dict[str, Any]  #token等用量
+    result: str      #原始文本结果
+    is_error: bool   #是否出差
 
     # Structured output — the main thing downstream code cares about.
     # None if parsing failed (check parse_error for why).
-    output: Optional[T] = None
+    output: Optional[T] = None   #解析成功的T实例；失败则为None
 
     # Error info when output parsing fails
-    parse_error: Optional[str] = None
-    raw_structured_output: Optional[Any] = None
+    parse_error: Optional[str] = None  #解析失败原因
+    raw_structured_output: Optional[Any] = None  #SDK返回的原始structured对象
 
     # Full response list for debugging
     messages: list[Any]
 
     class Config:
         arbitrary_types_allowed = True
-
-    def summarize(
-        self,
-        head_chars: int = 60_000,
-        tail_chars: int = 60_000,
-    ) -> str:
+    
+    #给skill_proposer/prompt_proposer用的文本摘要：
+    # · 成功：尽量带完整 result （要看工具调用过程）
+    # · 有 parse_erroe: result 太长时只保留头 + 尾，避免撑爆 proposer 上下文
+    # 这就是[分析运行轨迹] 时proposer 读的内容来源之一。
+    def summarize(self,head_chars: int = 60_000,tail_chars: int = 60_000,) -> str:
         """Create a text summary of this trace for passing to downstream agents.
 
         The proposer agent reads these summaries to understand what went wrong.
@@ -116,7 +123,11 @@ class AgentTrace(BaseModel, Generic[T]):
 
         return "\n".join(lines)
 
-
+'''
+Agent(Generic[T])是EvoSkill里跑LLM agent的统一入口：上层只调await agent.run(query),底层按全局SDK选 Claude/OpenCode/Goose等executor,并带上
+重试、超时和结构化输出解析。
+T = TypeVar("T",bound=BaseModel) #T 必须是 Pydantic 模型
+'''
 class Agent(Generic[T]):
     """Generic wrapper for running agents via Claude SDK or OpenCode SDK.
 
@@ -137,26 +148,22 @@ class Agent(Generic[T]):
     INITIAL_BACKOFF = 30     # Seconds to wait after first failure (doubles each retry)
 
     def __init__(
-        self,
-        options: OptionsProvider,
-        response_model: Type[T],
-        *,
-        timeout_seconds: int | None = None,
-        max_retries: int | None = None,
-    ):
+        self,options: OptionsProvider,response_model: Type[T],*,timeout_seconds: int | None = None,max_retries: int | None = None,):
         self._options = options
         self.response_model = response_model
         self.timeout_seconds = (
             self.TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
         )
         self.max_retries = self.MAX_RETRIES if max_retries is None else max_retries
-
+    
+    #解析配置
     def _get_options(self) -> Union[ClaudeAgentOptionsType, dict[str, Any]]:
         """Resolve options — if it's a factory (callable), call it to get fresh options."""
         if callable(self._options):
             return self._options()
         return self._options
 
+    #调SDK一次
     async def _execute_query(self, query: str) -> list[Any]:
         """Execute a single query by delegating to the active SDK's executor."""
         options = self._get_options()
@@ -179,7 +186,8 @@ class Agent(Generic[T]):
             return await _goose_executor.execute_query(options, query)
         else:
             raise ValueError(f"Unknown SDK: {sdk!r}")
-
+    
+    #超时+指数退避重试
     async def _run_with_retry(self, query: str) -> list[Any]:
         """Execute query with timeout and exponential backoff retry.
 
