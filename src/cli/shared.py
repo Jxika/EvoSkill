@@ -15,21 +15,25 @@ if TYPE_CHECKING:
 def load_and_split(cfg: ProjectConfig):
     from src.api.data_utils import stratified_split
 
-    data = pd.read_csv(cfg.dataset_path)
+    if cfg.dataset.source == "harbor":
+        from src.api.harbor_loader import load_harbor_tasks
+        data = load_harbor_tasks(cfg)
+    else:
+        data = pd.read_csv(cfg.dataset_path)
 
-    renames: dict[str, str] = {}
-    if cfg.dataset.question_column != "question":
-        renames[cfg.dataset.question_column] = "question"
-    if cfg.dataset.ground_truth_column != "ground_truth":
-        renames[cfg.dataset.ground_truth_column] = "ground_truth"
-    if renames:
-        data.rename(columns=renames, inplace=True)
+        renames: dict[str, str] = {}
+        if cfg.dataset.question_column != "question":
+            renames[cfg.dataset.question_column] = "question"
+        if cfg.dataset.ground_truth_column != "ground_truth":
+            renames[cfg.dataset.ground_truth_column] = "ground_truth"
+        if renames:
+            data.rename(columns=renames, inplace=True)
 
-    if cfg.dataset.category_column and cfg.dataset.category_column in data.columns:
-        if cfg.dataset.category_column != "category":
-            data.rename(columns={cfg.dataset.category_column: "category"}, inplace=True)
-    elif "category" not in data.columns:
-        data["category"] = "default"
+        if cfg.dataset.category_column and cfg.dataset.category_column in data.columns:
+            if cfg.dataset.category_column != "category":
+                data.rename(columns={cfg.dataset.category_column: "category"}, inplace=True)
+        elif "category" not in data.columns:
+            data["category"] = "default"
 
     return stratified_split(
         data,
@@ -76,12 +80,16 @@ def _normalize_provider_model(provider: str, model: str) -> str:
 
 async def call_llm(provider: str, model: str, prompt: str) -> str:
     """Call the requested LLM provider and return the raw text response."""
+    from src.harness.provider_auth import ensure_provider_api_key
+
+    provider = provider.strip().lower()
     normalized_model = _normalize_provider_model(provider, model)
+    api_key = ensure_provider_api_key(provider)
 
     if provider == "anthropic":
         import anthropic
 
-        client = anthropic.AsyncAnthropic()
+        client = anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
             model=normalized_model,
             max_tokens=16,
@@ -97,7 +105,7 @@ async def call_llm(provider: str, model: str, prompt: str) -> str:
                 "openai package not installed. Run: uv add openai"
             ) from exc
 
-        client = openai.AsyncOpenAI()
+        client = openai.AsyncOpenAI(api_key=api_key)
         response = await client.chat.completions.create(
             model=normalized_model,
             max_tokens=16,
@@ -112,12 +120,6 @@ async def call_llm(provider: str, model: str, prompt: str) -> str:
             raise RuntimeError(
                 "openai package not installed. Run: uv add openai"
             ) from exc
-
-        api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("LLM_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "OpenRouter API key not configured. Set OPENROUTER_API_KEY or LLM_API_KEY."
-            )
 
         default_headers: dict[str, str] = {}
         if referer := os.environ.get("OPENROUTER_HTTP_REFERER"):
@@ -145,7 +147,7 @@ async def call_llm(provider: str, model: str, prompt: str) -> str:
                 "google-genai package not installed. Run: uv add google-genai"
             ) from exc
 
-        client = genai.Client()
+        client = genai.Client(api_key=api_key)
         response = await client.aio.models.generate_content(model=normalized_model, contents=prompt)
         return response.text
 
@@ -158,10 +160,11 @@ make_scorer 在src/cli/shared.py 里，是一个工厂函数：读 load_config()
 '''
 def make_scorer(cfg: ProjectConfig):
     from src.loop.runner import _score_multi_tolerance
-    
-    #四种实现模式
-    #.去空格、转小写后 完全相等 -> 1.0,否则 0.0
-    #.适合选择题、固定格式答案
+
+    if cfg.scorer.type == "harbor":
+        from src.evaluation.harbor_scorer import harbor_reward_scorer
+        return harbor_reward_scorer
+
     if cfg.scorer.type == "exact":
 
         def exact(question: str, predicted: str, ground_truth: str) -> float:
@@ -198,13 +201,33 @@ def make_scorer(cfg: ProjectConfig):
             try:
                 text = await call_llm(provider, model, prompt)
                 return float(text.strip())
-            except (ValueError, Exception):
+            except ValueError:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "LLM scorer: could not parse response as float: %r", text
+                )
+                return 0.0
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error(
+                    "LLM scorer failed (%s: %s) — returning 0.0",
+                    type(exc).__name__, exc,
+                )
                 return 0.0
 
         def llm_scorer(question: str, predicted: str, ground_truth: str) -> float:
-            return asyncio.get_event_loop().run_until_complete(
-                llm_score(question, predicted, ground_truth)
-            )
+            coro = llm_score(question, predicted, ground_truth)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop — safe to use asyncio.run()
+                return asyncio.run(coro)
+            else:
+                # Inside a running loop (e.g. SelfImprovingLoop) —
+                # run in a separate thread with its own event loop
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    return pool.submit(asyncio.run, coro).result()
 
         return llm_scorer
     #自定义脚本
@@ -212,9 +235,24 @@ def make_scorer(cfg: ProjectConfig):
         import shlex
         import subprocess
 
+        if not cfg.scorer.command:
+            raise ValueError(
+                "scorer.type is 'script' but scorer.command is not set in config.toml"
+            )
+
         def script_scorer(question: str, predicted: str, ground_truth: str) -> float:
-            cmd = cfg.scorer.command.format(predicted=predicted, expected=ground_truth)
-            result = subprocess.run(shlex.split(cmd), capture_output=True, text=True)
+            # Use Template-style substitution to avoid KeyError on { } in answers
+            cmd = cfg.scorer.command.replace("{predicted}", predicted).replace("{expected}", ground_truth)
+            try:
+                result = subprocess.run(
+                    shlex.split(cmd), capture_output=True, text=True, timeout=30,
+                )
+            except subprocess.TimeoutExpired:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Script scorer timed out (30s): %s", cmd[:120],
+                )
+                return 0.0
             try:
                 return float(result.stdout.strip())
             except ValueError:

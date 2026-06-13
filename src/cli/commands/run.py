@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 import click
@@ -12,9 +14,19 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
+from src.cli.config import load_config
 from src.cli.report import RunReport, SkillEntry
 
 console = Console()
+
+
+def _is_under_project(path: Path, project_root: Path) -> bool:
+    """Check if path is inside the project root."""
+    try:
+        path.relative_to(project_root)
+        return True
+    except ValueError:
+        return False
 
 
 # ── display helpers ──────────────────────────────────────────────────────────
@@ -111,11 +123,11 @@ class LoopDisplay:
                 )
 
         elif event == "sample":
-            if self.verbose:
+            if not self.quiet:
                 icon = "✓" if data["passed"] else "✗"
                 style = "green" if data["passed"] else "red"
                 self._live.console.print(
-                    f"  [{data['category']}] {icon} {data['question'][:60]}",
+                    f"   {icon} [{data['category']}] {data['question'][:60]}",
                     style=style,
                 )
 
@@ -186,6 +198,15 @@ class LoopDisplay:
 
 # ── command ──────────────────────────────────────────────────────────────────
 
+def _get_remote_backend(cfg):
+    """Return the appropriate remote backend based on config."""
+    target = cfg.remote.target
+    if target == "daytona":
+        from src.remote.daytona import DaytonaBackend
+        return DaytonaBackend()
+    raise ValueError(f"Unsupported remote target: {target}")
+
+
 @click.command("run")
 @click.option("--continue", "continue_loop", is_flag=True, default=False,
               help="Resume from the current frontier.")
@@ -193,18 +214,130 @@ class LoopDisplay:
               help="Show full failure examples and per-sample results.")
 @click.option("--quiet", is_flag=True, default=False,
               help="Show progress table only, no inline proposer output.")
-def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
+@click.option("--config", "config_path", type=click.Path(dir_okay=False, path_type=Path),
+              default=None, help="Load a specific config TOML file.")
+@click.option("--docker", is_flag=True, default=False,
+              help="Run the loop inside a Docker container.")
+@click.option("--rebuild", is_flag=True, default=False,
+              help="Force rebuild the Docker image before running.")
+@click.option("--remote", is_flag=True, default=False,
+              help="Run the loop on a remote Daytona sandbox.")
+def run_cmd(continue_loop: bool, verbose: bool, quiet: bool, config_path: Path | None,
+            docker: bool, rebuild: bool, remote: bool):
     """Run the self-improvement loop."""
+    # Auto-select execution mode from config if no flag given.
+    # Skip inside containers (EVOSKILL_REMOTE=1) to avoid recursion.
+    if not docker and not remote and not os.environ.get("EVOSKILL_REMOTE"):
+        from src.cli.config import load_config as _lc
+        _cfg = _lc(config_path=config_path)
+        if _cfg.execution == 'docker':
+            docker = True
+        elif _cfg.execution == 'daytona':
+            remote = True
+
+    if remote:
+        cfg = load_config(config_path=config_path)
+        if not cfg.remote:
+            console.print("[red]Error:[/red] No [remote] section in config.toml. "
+                          "Add remote config first.")
+            raise SystemExit(1)
+
+        backend = _get_remote_backend(cfg)
+        console.print(f"\n  [bold]EvoSkill Remote[/bold] — {cfg.remote.target}\n")
+
+        try:
+            console.print("  [1/4] Creating sandbox...", end="")
+            backend.setup(cfg)
+            console.print(f" [green]done[/green]")
+
+            project_root = cfg.project_root.resolve()
+            external_dirs = [d for d in cfg.harness.data_dirs
+                             if not Path(d).resolve().is_relative_to(project_root)]
+
+            if cfg.dataset.source == "harbor":
+                harbor_root = cfg.harbor_tasks_root_path.resolve()
+                external_harbor = not _is_under_project(harbor_root, project_root)
+            else:
+                external_harbor = False
+
+            console.print("  [2/4] Uploading...")
+            def _upload_log(msg):
+                console.print(f"         {msg}")
+            backend.upload(cfg, log=_upload_log)
+            console.print(f"         [green]done[/green]")
+            console.print(f"         project files → /workspace/")
+            if cfg.dataset.source == "harbor" and external_harbor:
+                console.print(f"         harbor tasks ({harbor_root.name}) → /mnt/harbor_tasks/")
+            elif cfg.dataset.source != "harbor":
+                dataset_path = cfg.dataset_path.resolve()
+                if not _is_under_project(dataset_path, project_root):
+                    console.print(f"         dataset ({dataset_path.name}) → /mnt/dataset/")
+            if external_dirs:
+                for d in external_dirs:
+                    name = Path(d).name
+                    console.print(f"         {name} → /mnt/data/{name}/")
+
+            console.print("  [3/4] Installing EvoSkill...", end="")
+            console.print(f" [green]done[/green]")
+
+            extra_args = []
+            if continue_loop:
+                extra_args.append("--continue")
+            if verbose:
+                extra_args.append("--verbose")
+            if quiet:
+                extra_args.append("--quiet")
+
+            console.print("  [4/4] Starting loop...", end="")
+            run_info = backend.run(cfg, extra_args=extra_args or None)
+            console.print(f" [green]done[/green]")
+
+        except Exception:
+            console.print(f" [red]failed[/red]")
+            console.print("\n  Cleaning up sandbox...", end="")
+            backend.cleanup_current(cfg)
+            console.print(" [green]done[/green]\n")
+            raise
+
+        console.print(f"\n  Run: {run_info.run_id}")
+        console.print(f"\n  [bold]Next steps:[/bold]")
+        console.print(f"    evoskill remote status       check progress")
+        console.print(f"    evoskill remote logs -f       stream live output")
+        console.print(f"    evoskill remote download     pull results when done")
+        console.print(f"    evoskill remote stop          cancel the run\n")
+        return
+
+    if docker:
+        from src.docker.launcher import launch_docker
+
+        cfg = load_config(config_path=config_path)
+        extra_args = []
+        if continue_loop:
+            extra_args.append("--continue")
+        if verbose:
+            extra_args.append("--verbose")
+        if quiet:
+            extra_args.append("--quiet")
+        launch_docker(cfg, extra_args=extra_args, rebuild=rebuild)
+        return
+
     from src.harness import Agent, set_sdk
     from src.agent_profiles.base_agent.base_agent import make_base_agent_options_from_task
-    from src.agent_profiles.prompt_generator.prompt_generator import ( make_prompt_generator_options )
-    from src.agent_profiles.prompt_proposer.prompt_proposer import ( make_prompt_proposer_options, )
-    from src.agent_profiles.skill_generator.skill_generator import (make_skill_generator_options,)
-    from src.agent_profiles.skill_proposer.skill_proposer import (make_skill_proposer_options,)
-    from src.cli.config import load_config
+    from src.agent_profiles.prompt_generator.prompt_generator import (
+        make_prompt_generator_options,
+    )
+    from src.agent_profiles.prompt_proposer.prompt_proposer import (
+        make_prompt_proposer_options,
+    )
+    from src.agent_profiles.skill_generator.skill_generator import (
+        make_skill_generator_options,
+    )
+    from src.agent_profiles.skill_proposer.skill_proposer import (
+        make_skill_proposer_options,
+    )
     from src.cli.shared import load_and_split, make_scorer
     from src.loop import LoopAgents, LoopConfig, SelfImprovingLoop
-    from src.registry import ProgramManager
+    from src.registry import ProgramManager, ProgramManagerError
     from src.schemas import (
         AgentResponse,
         PromptGeneratorResponse,
@@ -212,7 +345,7 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
         SkillProposerResponse,
         ToolGeneratorResponse,
     )
-    cfg = load_config()
+    cfg = load_config(config_path=config_path)
 
     # Validate task.md
     if not cfg.task_description:
@@ -220,6 +353,29 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
         raise SystemExit(1)
     if not cfg.task_constraints and not quiet:
         console.print("[yellow]Warning:[/yellow] No constraints defined in task.md — skills may be unconstrained.")
+
+    # Validate harbor + dataset coherence
+    if cfg.harbor.enabled and cfg.dataset.source != "harbor":
+        console.print(
+            "[red]Error:[/red] harbor.enabled is true but dataset.source is "
+            f"'{cfg.dataset.source}'. Set dataset.source = \"harbor\" in config.toml."
+        )
+        raise SystemExit(1)
+    if cfg.dataset.source == "harbor" and not cfg.harbor.enabled:
+        console.print(
+            "[red]Error:[/red] dataset.source is 'harbor' but harbor.enabled is false. "
+            "Set harbor.enabled = true in config.toml."
+        )
+        raise SystemExit(1)
+
+    # Auto-fix harbor.env when running on Daytona — Docker is not available in sandboxes
+    if cfg.harbor.enabled and cfg.execution == "daytona" and cfg.harbor.env == "docker":
+        cfg.harbor.env = "daytona"
+        if not quiet:
+            console.print(
+                "[yellow]Note:[/yellow] Overriding harbor.env to 'daytona' — "
+                "Docker is not available inside Daytona sandboxes."
+            )
 
     console.print(f"\n  [bold]EvoSkill[/bold] — {cfg.evolution.mode}  |  {cfg.harness.name}  |  {cfg.evolution.iterations} iterations\n")
 
@@ -237,8 +393,19 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
     except FileNotFoundError:
         console.print(f"[red]Error:[/red] Dataset not found at {cfg.dataset_path}")
         raise SystemExit(1)
+    except Exception as exc:
+        # Catches HarborLoadError without importing it (avoids cycle).
+        if exc.__class__.__name__ == "HarborLoadError":
+            console.print(f"[red]Error:[/red] Harbor dataset: {exc}")
+            raise SystemExit(1)
+        raise
 
-    console.print(f"  Dataset: {cfg.dataset_path}  ({len(val_data)} val samples)\n")
+    if cfg.dataset.source == "harbor":
+        console.print(
+            f"  Harbor dataset: {cfg.harbor_tasks_root_path}  ({len(val_data)} val tasks)\n"
+        )
+    else:
+        console.print(f"  Dataset: {cfg.dataset_path}  ({len(val_data)} val samples)\n")
 
     # Build agents — use task.md description as the base agent prompt
     # base_factory 是把task.md 任务描述 +harness配置+AgentResponse schema+工具列表，包装成[每次run可重新生成的base agent options]的工厂函数，交给
@@ -249,13 +416,38 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
         data_dirs=cfg.harness.data_dirs,
         project_root=cfg.project_root,
     )
-    agents = LoopAgents(
-        base=Agent(
+
+    if cfg.harbor.enabled:
+        from src.harness.harbor import HarborAgent
+        skills_source = cfg.project_root / ".claude" / "skills"
+        base_agent = HarborAgent(
+            project_root=cfg.project_root,
+            skills_source_dir=skills_source,
+            inner_agent=cfg.harbor.inner_agent,
+            inner_model=cfg.harbor.inner_model,
+            env=cfg.harbor.env,
+            n_concurrent=cfg.harbor.n_concurrent,
+            timeout_seconds=cfg.harness.timeout_seconds,
+            max_retries=cfg.harness.max_retries,
+            jobs_dir=Path(cfg.harbor.jobs_dir) if cfg.harbor.jobs_dir else None,
+            container_skills_path=cfg.harbor.container_skills_path,
+            timeout_multiplier=cfg.harbor.timeout_multiplier,
+            extra_args=cfg.harbor.extra_args,
+        )
+        console.print(
+            f"  [cyan]Harbor mode:[/cyan] inner agent={cfg.harbor.inner_agent}  "
+            f"env={cfg.harbor.env}  n_concurrent={cfg.harbor.n_concurrent}\n"
+        )
+    else:
+        base_agent = Agent(
             base_factory,
             AgentResponse,
             timeout_seconds=cfg.harness.timeout_seconds,
             max_retries=cfg.harness.max_retries,
-        ),
+        )
+
+    agents = LoopAgents(
+        base=base_agent,
         skill_proposer=Agent(
             make_skill_proposer_options(
                 project_root=cfg.project_root,
@@ -327,6 +519,9 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
             task_constraints=cfg.task_constraints,
         )
         result = asyncio.run(loop.run())
+    except ProgramManagerError as exc:
+        console.print(f"\n[red]Error:[/red] {exc}\n")
+        raise SystemExit(1) from exc
     finally:
         display.stop()
 
