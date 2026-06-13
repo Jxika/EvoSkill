@@ -16,8 +16,15 @@ T = TypeVar("T")
 def _extract_model(options) -> str:
     """Best-effort model id extraction from either dict or ClaudeAgentOptions."""
     if isinstance(options, dict):
-        return str(options.get("model", "") or "")
-    return str(getattr(options, "model", "") or "")
+        if options.get("model"):
+           return str(options["model"])
+        pid = options.get("provider_id")
+        mid = options.get("model_id")
+        if pid and mid:
+            return f"{pid}/{mid}"
+    #if isinstance(options, dict):
+    #    return str(options.get("model", "") or "")
+    #return str(getattr(options, "model", "") or "")
 
 
 @dataclass
@@ -45,7 +52,7 @@ async def evaluate_agent_parallel(agent: Agent[T],items: list[tuple[str, str]],m
     Returns:
         List of EvalResult containing question, ground_truth, and trace
     """
-    semaphore = asyncio.Semaphore(max_concurrent) #最大并发数
+    semaphore = asyncio.Semaphore(1) #最大并发数
 
     async def run_one(question: str, ground_truth: str) -> EvalResult[T]:
         async with semaphore:
@@ -54,7 +61,7 @@ async def evaluate_agent_parallel(agent: Agent[T],items: list[tuple[str, str]],m
                     # Check cache first
                     trace = None
                     sdk = get_sdk()
-                    model = _extract_model(agent._get_options())
+                    model = _extract_model(agent._get_options()) # ❌️todo：取值为空
                     if cache is not None:
                         trace = cache.get(  #先查cache，再agent.run:命中就不花钱、不调模型。
                             question,

@@ -241,6 +241,8 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
     console.print(f"  Dataset: {cfg.dataset_path}  ({len(val_data)} val samples)\n")
 
     # Build agents — use task.md description as the base agent prompt
+    # base_factory 是把task.md 任务描述 +harness配置+AgentResponse schema+工具列表，包装成[每次run可重新生成的base agent options]的工厂函数，交给
+    # Agent(base_factory,AgentResponse),供整个进化循环里 答题和评估 使用。
     base_factory = make_base_agent_options_from_task(
         cfg.task_description,
         model=cfg.harness.model,
@@ -308,6 +310,16 @@ def run_cmd(continue_loop: bool, verbose: bool, quiet: bool):
     display.start()
 
     try:
+        '''
+        config:LoopConfig 循环行为：轮次、frontier、进入化模式、并发、续跑等
+        agents:LoopAgents 5个Agent：答题+提议+生成
+        manager:ProgramManager Git分析/frontier/commit
+        train_pools:训练抽样
+        val_data:验证集
+        scorer:打分函数
+        on_event:LoopDisplay 显示回调
+        task_constraints:task.md 约束段，给proposer
+        '''
         loop = SelfImprovingLoop(
             loop_config, agents, manager, train_pools, val_data,
             scorer=make_scorer(cfg),

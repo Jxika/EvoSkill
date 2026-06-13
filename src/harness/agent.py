@@ -239,6 +239,7 @@ class Agent(Generic[T]):
             from .claude import executor as _claude_executor
             fields = _claude_executor.parse_response(messages, self.response_model)
         elif sdk == "opencode":
+            #把已经跑完并返回原始JSON后，把它统一解析成AgentTrace能用的dict
             from .opencode import executor as _opencode_executor
             fields = _opencode_executor.parse_response(messages, self.response_model, self._get_options)
         elif sdk == "openhands":

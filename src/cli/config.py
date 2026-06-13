@@ -44,7 +44,10 @@ class DatasetConfig:
     train_ratio: float = 0.18
     val_ratio: float = 0.12
 
-
+'''
+ 目前EvoSkill 的frontier是单目标Top-K精英集，用"frontier"这个名字容易让人联想到帕累托，但实现上就是 一个评分、排序、留
+ 前K名；保留多个版本是为了进化搜索多样性，不是为了多目标trade-off.
+'''
 @dataclass
 class ScorerConfig:
     type: Literal['exact', 'multi_tolerance', 'llm', 'script'] = 'multi_tolerance'
@@ -93,7 +96,10 @@ def _parse_task_md(text: str) -> tuple[str, str]:
     constraints = parts[1].strip() if len(parts) > 1 else ''
     return description, constraints
 
-
+'''
+   load_config 是Evoskill CLI的项目配置加载入口：从磁盘找到.evoskill目录，读config.toml + task.md,组装成一个类型化的 ProjectConfig 对象，供
+   evoskill run、eval、skills等命令使用。
+'''
 def load_config(start: Path | None = None) -> ProjectConfig:
     """Find and load the project config. Exits with a message if not found."""
     root = _find_project_root(start)

@@ -151,10 +151,17 @@ async def call_llm(provider: str, model: str, prompt: str) -> str:
 
     raise ValueError(f"Unknown provider: {provider}")
 
+'''
+make_scorer 在src/cli/shared.py 里，是一个工厂函数：读 load_config()得到的 ProjectConfig，根据[scorer]配置返回
+一个可调用的打分函数。
 
+'''
 def make_scorer(cfg: ProjectConfig):
     from src.loop.runner import _score_multi_tolerance
-
+    
+    #四种实现模式
+    #.去空格、转小写后 完全相等 -> 1.0,否则 0.0
+    #.适合选择题、固定格式答案
     if cfg.scorer.type == "exact":
 
         def exact(question: str, predicted: str, ground_truth: str) -> float:
@@ -166,10 +173,15 @@ def make_scorer(cfg: ProjectConfig):
             )
 
         return exact
-
+    # 底层score_answer 做模糊匹配:文本包含、数字容差、多数字、单位等
+    # 5档容差各打 0/1,再加权平均 成一个 0~1的连续分数。
+    # 更严的容差权重更高（exact档权重约1.0,10%容差约0.33）
+    # 所以默认socrer往往不是纯 0/1,例如[接近正确]可能得到0.5~0.8。
     if cfg.scorer.type == "multi_tolerance":
         return _score_multi_tolerance
 
+    #外层是 同步函数，内部用 run_until_comlete 调异步 LLM.在asyncio.run(loop.run())里嵌套调用时，
+    #某些环境下可能有问题;eval 单独跑一般没问题。
     if cfg.scorer.type == "llm":
         rubric = cfg.scorer.rubric or "Award 1.0 if correct, 0.0 if wrong."
         model = cfg.scorer.model or "claude-sonnet-4-6"
@@ -195,7 +207,7 @@ def make_scorer(cfg: ProjectConfig):
             )
 
         return llm_scorer
-
+    #自定义脚本
     if cfg.scorer.type == "script":
         import shlex
         import subprocess

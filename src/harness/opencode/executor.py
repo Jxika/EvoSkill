@@ -304,6 +304,7 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
             body["mode"] = options["mode"]
         if options.get("format"):
             body["format"] = options["format"]
+            print( f"options['format']  ================> : {options['format']}")
         #当前的400错误发生在 POST .../message:raise_for_status()时OpenCode拒绝做个format结构。
         r = await client.post(f"/session/{session_id}/message", json=body)
         r.raise_for_status()
