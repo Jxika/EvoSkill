@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -122,6 +123,55 @@ def _wait_for_port(port: int, timeout: float = 15) -> None:
             time.sleep(0.5)
 
 
+def _opencode_executable_candidates(cwd: str | Path | None = None) -> list[str]:
+    """Return candidate OpenCode CLI paths, most specific first."""
+    candidates: list[str] = []
+
+    env_bin = os.environ.get("OPENCODE_BIN")
+    if env_bin:
+        candidates.append(env_bin)
+
+    which = shutil.which("opencode")
+    if which:
+        candidates.append(which)
+
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            npm_dir = Path(appdata) / "npm"
+            candidates.extend(
+                str(p) for p in (npm_dir / "opencode.cmd", npm_dir / "opencode.exe")
+            )
+
+        if cwd:
+            root = Path(cwd)
+            for pattern in (
+                "node_modules/.bin/opencode.cmd",
+                "node_modules/.bin/opencode",
+            ):
+                candidates.append(str(root / pattern))
+
+    candidates.append("opencode")
+    return candidates
+
+
+def _resolve_opencode_executable(cwd: str | Path | None = None) -> str:
+    """Locate the OpenCode CLI executable or raise a helpful error."""
+    for candidate in _opencode_executable_candidates(cwd):
+        path = Path(candidate)
+        if path.is_file():
+            return str(path.resolve())
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    raise FileNotFoundError(
+        "OpenCode CLI not found. Install it and ensure it is on PATH, for example:\n"
+        "  npm install -g opencode-ai\n"
+        "Or set OPENCODE_BIN to the full path of opencode.cmd (Windows) or opencode (Unix)."
+    )
+
+
 def _ensure_server(options: dict[str, Any]) -> str:
     """Return ``http://127.0.0.1:<port>`` for a running opencode server.
 
@@ -143,8 +193,9 @@ def _ensure_server(options: dict[str, Any]) -> str:
     env = dict(os.environ)
     apply_provider_auth_env(options.get("provider_id"), env)
 
+    opencode_bin = _resolve_opencode_executable(options.get("cwd"))
     proc = subprocess.Popen(
-        ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
+        [opencode_bin, "serve", "--port", str(port), "--hostname", "127.0.0.1"],
         cwd=options.get("cwd"),
         env=env,
         stdout=subprocess.DEVNULL,

@@ -414,12 +414,14 @@ class TestOptionsUtils:
             model="anthropic/claude-sonnet-4-6",
         )
 
-        assert result["system"] == "You are helpful."
+        assert "You are helpful." in result["system"]
+        assert "JSON object" in result["system"]
         assert result["provider_id"] == "anthropic"
         assert result["model_id"] == "claude-sonnet-4-6"
         assert "read" in result["tools"]
         assert "bash" in result["tools"]
-        assert result["format"] == {"type": "json_schema", "schema": {"type": "object"}}
+        assert "format" not in result
+        assert result["response_schema"] == {"type": "object"}
 
     def test_build_opencode_options_with_data_dirs(self, tmp_path):
         from src.harness.opencode.options import build_opencode_options
@@ -438,6 +440,19 @@ class TestOptionsUtils:
         # Data dir paths should appear in system prompt
         assert str(data_dir) in result["system"]
         assert str(data_dir) in result["add_dirs"]
+
+    def test_build_opencode_options_honors_json_schema_env(self, tmp_path, monkeypatch):
+        from src.harness.opencode.options import build_opencode_options
+
+        monkeypatch.setenv("OPENCODE_JSON_SCHEMA_FORMAT", "1")
+        result = build_opencode_options(
+            system="You are helpful.",
+            schema={"type": "object"},
+            tools=[],
+            project_root=tmp_path,
+        )
+        assert result["format"]["type"] == "json_schema"
+        assert result["format"]["schema"] == {"type": "object"}
 
 
 # ===========================================================================

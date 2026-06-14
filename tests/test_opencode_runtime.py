@@ -67,6 +67,30 @@ def _make_server_responses():
     return session, chat, messages
 
 
+class TestResolveOpencodeExecutable:
+    def test_prefers_opencode_bin_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        fake = tmp_path / "custom-opencode.cmd"
+        fake.write_text("@echo off\n")
+        monkeypatch.setenv("OPENCODE_BIN", str(fake))
+        assert executor._resolve_opencode_executable() == str(fake.resolve())
+
+    def test_uses_shutil_which(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("OPENCODE_BIN", raising=False)
+        monkeypatch.setattr(
+            executor.shutil,
+            "which",
+            lambda name: r"C:\npm\opencode.cmd" if name == "opencode" else None,
+        )
+        assert executor._resolve_opencode_executable() == r"C:\npm\opencode.cmd"
+
+    def test_raises_when_not_found(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("OPENCODE_BIN", raising=False)
+        monkeypatch.setattr(executor, "_opencode_executable_candidates", lambda _cwd=None: ["missing"])
+        monkeypatch.setattr(executor.shutil, "which", lambda _name: None)
+        with pytest.raises(FileNotFoundError, match="OpenCode CLI not found"):
+            executor._resolve_opencode_executable()
+
+
 class TestExecuteQuery:
     def test_sends_nested_model_and_parses_structured_output(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
@@ -79,7 +103,15 @@ class TestExecuteQuery:
         monkeypatch.setattr(executor, "_find_free_port", lambda: 5555)
         monkeypatch.setattr(executor, "_kill_all_opencode_servers", lambda: None)
         monkeypatch.setattr(executor, "_push_provider_auth", lambda *a: None)
-        monkeypatch.setattr("subprocess.Popen", lambda *a, **kw: (popen_calls.append(kw), SimpleNamespace(pid=99))[1])
+        monkeypatch.setattr(
+            executor,
+            "_resolve_opencode_executable",
+            lambda _cwd=None: r"C:\npm\opencode.cmd",
+        )
+        monkeypatch.setattr(
+            "subprocess.Popen",
+            lambda *args, **kw: (popen_calls.append((args, kw)), SimpleNamespace(pid=99))[1],
+        )
         monkeypatch.setattr("time.sleep", lambda _: None)
         monkeypatch.setattr(executor, "_wait_for_port", lambda *a, **kw: None)
 
@@ -117,7 +149,8 @@ class TestExecuteQuery:
             result = asyncio.run(executor.execute_query(options, "What is 2+2?"))
 
         assert popen_calls
-        assert popen_calls[0]["cwd"] == str(tmp_path)
+        assert popen_calls[0][0][0] == r"C:\npm\opencode.cmd"
+        assert popen_calls[0][1]["cwd"] == str(tmp_path)
 
         fields = executor.parse_response(result, AgentResponse, lambda: options)
         assert fields["output"] is not None

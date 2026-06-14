@@ -1,0 +1,9 @@
+在 PowerShell 里执行一次：
+     function evoskill {
+    python -c "from src.cli.main import cli; import sys; cli(sys.argv[1:])" @args
+}
+之后就可以：
+evoskill --help
+evoskill reset
+evoskill init
+evoskill run --verbose

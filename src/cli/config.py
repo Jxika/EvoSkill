@@ -263,7 +263,7 @@ def load_config(
         )
 
     task_path = root / EVOSKILL_DIR / 'task.md'
-    description, constraints = _parse_task_md(task_path.read_text()) if task_path.exists() else ('', '')
+    description, constraints = _parse_task_md(task_path.read_text(encoding='utf-8')) if task_path.exists() else ('', '')
 
     execution = raw.get('execution', 'local')
 

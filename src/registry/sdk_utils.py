@@ -153,7 +153,7 @@ def options_to_config(
                 "model_id": options.get("model_id"),
                 "cwd": options.get("cwd"),
             })
-            output_format = options.get("format")
+            output_format = options.get("format") or options.get("response_schema")
 
         elif sdk == "openhands":
             base_metadata.update({

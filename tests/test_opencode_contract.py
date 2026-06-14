@@ -104,8 +104,10 @@ def test_opencode_base_agent_factories_return_dicts_with_project_root_and_model_
         required_tools=("read", "edit", "bash", "skill"),
     )
     assert task_options["system"].startswith("Answer the question with the final answer only.")
-    assert task_options["format"]["type"] == "json_schema"
-    assert eval_options["format"]["type"] == "json_schema"
+    assert "format" not in task_options
+    assert "format" not in eval_options
+    assert task_options["response_schema"]["type"] == "object"
+    assert eval_options["response_schema"]["type"] == "object"
 
 
 def test_opencode_meta_agent_builders_return_dicts_with_project_root(

@@ -10,6 +10,7 @@ All OpenCode-specific construction logic lives here:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -18,6 +19,24 @@ from ..utils import resolve_project_root, resolve_data_dirs
 
 
 DEFAULT_OPENCODE_MODEL = DEFAULT_ANTHROPIC_MODEL
+
+# OpenCode 1.14.48+ rejects/persists format.json_schema incorrectly; see
+# https://github.com/anomalyco/opencode/issues/26929
+_USE_OPENCODE_API_JSON_SCHEMA = os.environ.get(
+    "OPENCODE_JSON_SCHEMA_FORMAT", ""
+).lower() in ("1", "true", "yes")
+
+#JSON格式
+def _system_with_json_schema_instruction(system: str, schema: dict[str, Any]) -> str:
+    """Ask the model for JSON in-band when API json_schema format is disabled."""
+    schema_text = json.dumps(schema, indent=2)
+    return (
+        f"{system.rstrip()}\n\n"
+        "Return your answer as a single JSON object matching this schema "
+        "(raw JSON only, no markdown fences or extra text):\n"
+        f"{schema_text}"
+    )
+
 
 CLAUDE_TO_OPENCODE_TOOL = {
     "Read": "read",
@@ -133,16 +152,23 @@ def build_opencode_options(
             f"{dirs_note}"
         )
 
-    return {
+    options: dict[str, Any] = {
         "system": system_with_dirs,
-        "format": {
-            "type": "json_schema",
-            "schema": schema,
-        },
         "tools": to_opencode_tools(tools),
         "mode": mode,
         "provider_id": provider_id,
         "model_id": model_id,
         "cwd": str(root),
         "add_dirs": resolved_add_dirs,
+        "response_schema": schema,
     }
+    if _USE_OPENCODE_API_JSON_SCHEMA:
+        options["format"] = {
+            "type": "json_schema",
+            "schema": schema,
+        }
+    else:
+        options["system"] = _system_with_json_schema_instruction(
+            system_with_dirs, schema
+        )
+    return options
